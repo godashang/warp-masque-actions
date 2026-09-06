@@ -1,5 +1,4 @@
 name: 生成 WARP MASQUE 配置
-
 on:
   workflow_dispatch:
     inputs:
@@ -11,21 +10,24 @@ on:
         description: artifact 保留天数
         required: false
         default: '7'
+  schedule:
+    # 定时触发：每天北京时间早上 5:30 自动运行一次 (对应 UTC 时间 21:30)
+    - cron: '30 21 * * *'
 
+# 核心修改：赋予 Actions 机器人向您的仓库提交和推送代码的权限
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   generate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-
       - name: 下载 usque
         run: |
           set -euo pipefail
           VER=$(curl -sL https://api.github.com/repos/Diniboy1123/usque/releases/latest \
-                | jq -r '.tag_name' | sed 's/^v//')
+            | jq -r '.tag_name' | sed 's/^v//')
           echo "usque 版本 $VER"
           curl -sL -o usque.zip \
             "https://github.com/Diniboy1123/usque/releases/download/v${VER}/usque_${VER}_linux_amd64.zip"
@@ -33,7 +35,6 @@ jobs:
           chmod +x usque
           # 没有 config.json 时 usque version 会先打一条 error，不影响结果
           ./usque version 2>/dev/null | grep -i version || true
-
       - name: 注册设备并生成密钥
         run: |
           set -euo pipefail
@@ -47,15 +48,13 @@ jobs:
           print("endpoint_v6 =", c["endpoint_v6"])
           print("内网地址 =", c["ipv4"], "/", c["ipv6"])
           PY
-
       - name: 生成 mihomo 配置
         run: python3 scripts/gen_masque.py config.json dist
-
       - name: 校验配置可加载
         run: |
           set -euo pipefail
           URL=$(curl -sL https://api.github.com/repos/MetaCubeX/mihomo/releases \
-                | grep -o 'https://[^"]*mihomo-linux-amd64-alpha[^"]*\.gz' | head -1)
+            | grep -o 'https://[^\"]*mihomo-linux-amd64-alpha[^\"]*\.gz' | head -1)
           curl -sL -o mihomo.gz "$URL"
           gunzip -f mihomo.gz
           chmod +x mihomo
@@ -64,14 +63,12 @@ jobs:
           # -t 只做配置解析校验，不起服务
           ./mihomo -t -d check
           echo "配置校验通过"
-
       - name: 打包凭据与配置
         run: |
           cp config.json dist/usque-config.json
           test -s dist/warp-masque.yaml
           test -s dist/warp-masque-shadowrocket.txt
           ls -l dist
-
       - name: 上传 artifact
         uses: actions/upload-artifact@v6
         with:
@@ -79,3 +76,22 @@ jobs:
           path: dist/
           retention-days: ${{ github.event.inputs.retention_days || 7 }}
           if-no-files-found: error
+
+      # 核心修改：新增自动提交新节点到您的 sub/ 目录
+      - name: 自动将节点配置文件提交回仓库
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # 创建存放订阅文件的目录
+          mkdir -p sub
+          cp dist/warp-masque.yaml sub/warp-masque.yaml
+          
+          # 提交到仓库
+          git add sub/warp-masque.yaml
+          if git diff --staged --quiet; then
+            echo "节点配置无变化，无需更新"
+          else
+            git commit -m "Auto-update WARP-Masque config at $(date)"
+            git push
+          fi
