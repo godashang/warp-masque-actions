@@ -11,10 +11,9 @@ on:
         required: false
         default: '7'
   schedule:
-    # 定时触发：每天北京时间早上 5:30 自动运行一次 (对应 UTC 时间 21:30)
-    - cron: '30 21 * * *'
+    # 优化 1：降低定时触发频率。改为每 3 天的北京时间清晨 5:30 自动运行一次 (UTC 时间 21:30)
+    - cron: '30 21 */3 * *'
 
-# 核心修改：赋予 Actions 机器人向您的仓库提交和推送代码的权限
 permissions:
   contents: write
 
@@ -23,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      
       - name: 下载 usque
         run: |
           set -euo pipefail
@@ -33,14 +33,13 @@ jobs:
             "https://github.com/Diniboy1123/usque/releases/download/v${VER}/usque_${VER}_linux_amd64.zip"
           unzip -oq usque.zip
           chmod +x usque
-          # 没有 config.json 时 usque version 会先打一条 error，不影响结果
           ./usque version 2>/dev/null | grep -i version || true
+
       - name: 注册设备并生成密钥
         run: |
           set -euo pipefail
           ./usque register -a -n "${{ github.event.inputs.device_name || 'gh-actions' }}"
           test -s config.json
-          # 只打印非敏感字段，密钥不进日志
           python3 - <<'PY'
           import json
           c = json.load(open("config.json"))
@@ -48,8 +47,23 @@ jobs:
           print("endpoint_v6 =", c["endpoint_v6"])
           print("内网地址 =", c["ipv4"], "/", c["ipv6"])
           PY
+
+      # 优化 2：在生成配置前，用 Python 脚本自动将 V6 节点池清空，只保留 V4 节点
+      - name: 仅保留 IPv4 节点（精简 IPv6）
+        run: |
+          python3 -c "
+          import re
+          with open('scripts/gen_masque.py', 'r', encoding='utf-8') as f:
+              content = f.read()
+          # 匹配 V6 = [...] 并清空为 V6 = []
+          content = re.sub(r'V6\s*=\s*\\[.*?\\]', 'V6 = []', content, flags=re.DOTALL)
+          with open('scripts/gen_masque.py', 'w', encoding='utf-8') as f:
+              f.write(content)
+          "
+
       - name: 生成 mihomo 配置
         run: python3 scripts/gen_masque.py config.json dist
+
       - name: 校验配置可加载
         run: |
           set -euo pipefail
@@ -60,15 +74,16 @@ jobs:
           chmod +x mihomo
           mkdir -p check
           cp dist/warp-masque.yaml check/config.yaml
-          # -t 只做配置解析校验，不起服务
           ./mihomo -t -d check
           echo "配置校验通过"
+
       - name: 打包凭据与配置
         run: |
           cp config.json dist/usque-config.json
           test -s dist/warp-masque.yaml
           test -s dist/warp-masque-shadowrocket.txt
           ls -l dist
+
       - name: 上传 artifact
         uses: actions/upload-artifact@v6
         with:
@@ -77,17 +92,14 @@ jobs:
           retention-days: ${{ github.event.inputs.retention_days || 7 }}
           if-no-files-found: error
 
-      # 核心修改：新增自动提交新节点到您的 sub/ 目录
       - name: 自动将节点配置文件提交回仓库
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           
-          # 创建存放订阅文件的目录
           mkdir -p sub
           cp dist/warp-masque.yaml sub/warp-masque.yaml
           
-          # 提交到仓库
           git add sub/warp-masque.yaml
           if git diff --staged --quiet; then
             echo "节点配置无变化，无需更新"
